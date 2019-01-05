@@ -1,0 +1,170 @@
+---
+title: "HR Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loading libraries
+```{r echo=FALSE}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(Information)
+library(caret)
+library(car)
+library(pROC)
+```
+
+## Loading datasets
+```{r message=FALSE}
+core_dataset<-read_csv("C:/Users/james/OneDrive/human-resources-data-set/HRDataset_v9.csv")
+```
+
+```{r}
+glimpse(core_dataset)
+table(core_dataset$`Hispanic/Latino`)
+core_dataset$`Hispanic/Latino`<-gsub("no","No",core_dataset$`Hispanic/Latino`)
+core_dataset$`Hispanic/Latino`<-gsub("yes","Yes",core_dataset$`Hispanic/Latino`)
+```
+
+## Exploratory Data Analysis (EDA)
+```{r}
+core_dataset %>%
+  count(`Employment Status`)
+
+ggplot(core_dataset, aes(x=`Employment Status`, fill=Sex)) +
+  geom_bar(position = 'dodge') +
+  geom_text(stat='count', aes(label=..count..), vjust=-1)+
+  coord_flip()
+
+
+```
+
+We can see that there are 5 types of employment statuses. In all types, Females have more population than males. A big portion of employee resigned voluntarily. I want to know the reasons behind that. So next sections will foucus on churned and active employees
+
+
+```{r}
+employees<-core_dataset %>%
+  filter(`Employment Status` %in% c("Voluntarily Terminated","Active"))
+```
+
+# Termination Investigation
+
+I noticed that we have reason for termination in the dataset. Let's check that out.
+```{r}
+employees %>%
+  count(`Employment Status`,`Reason For Term`) %>%
+  filter(`Employment Status`=="Voluntarily Terminated") %>%
+  ggplot(aes(x=reorder(`Reason For Term`,-n), y=n)) +
+  geom_bar(stat="identity") +
+  coord_flip()
+```
+
+It is a good thing that few employees were terminated due to poor performance. Most churned left because of another position, unhappy experience and money.
+
+# Churn Prediction
+
+Now we understand the motivations behind employee churns. This data needs to shine its ability to identify those who potentially want to churn. And address them with appropriate actions. So next we are going to build a logistic regression.
+
+## Dependent variable transformation
+```{r}
+employees$Churn<-ifelse(employees$`Employment Status`=='Active', 0, 1)
+```
+
+
+## Infomration Value: rank the importance of independent variables to dependent variable. Poor: <0.15; Moderate: 0.15-0.4; Strong: >0.4
+```{r}
+IV <- create_infotables(data = employees, y="Churn")
+Kept_Attributes<-IV$Summary %>%
+  arrange(IV) %>%
+  filter(IV>0) %>%
+  spread(Variable, IV) %>%
+  select(-c(contains("ID"),`Employee Number`)) %>%
+  gather(`Age`,`CitizenDesc`,`Days Employed`,`Department`,`Hispanic/Latino`,  `MaritalDesc`,`Pay Rate`,`Performance Score`,`RaceDesc`,`Sex`, key="Attribute",value = "IV")
+
+```
+
+## Keeping important variables
+```{r}
+employees_kept<-employees[,c(Kept_Attributes$Attribute,"Churn")]
+glimpse(employees_kept)
+```
+
+# Quick close-up on variable 'Days Employeed'
+By examing the variable 'Days Employed', there is indeed a clear cut line.
+```{r}
+ggplot(employees_kept,aes(x=factor(Churn),y=`Days Employed`)) +
+    geom_boxplot()
+```
+
+
+# Spitting
+```{r}
+set.seed(567)
+index_train<-createDataPartition(employees_kept$Churn,p=0.7, list=FALSE)
+train_set<- employees_kept[index_train,]
+test_set<- employees_kept[-index_train,]
+```
+
+# Building GLM model
+```{r}
+model<-glm(Churn~., family = "binomial",data=train_set)
+summary(model)
+```
+
+# Detection of multicollinearity
+
+1: Not correlated; 1-5: Moderately correlated; Greater than 5: Highly correlated
+```{r}
+vif(model)
+```
+
+# Predicting probability of turnover
+```{r}
+prediction<-predict(model,test_set,type="response")
+hist(prediction)
+ROC<-roc(test_set$Churn,prediction)
+plot(ROC,col="red")
+auc(ROC)
+
+
+pred<-ifelse(prediction>mean(prediction),1,0)
+```
+
+# Validation
+```{r}
+conf_matrix<-confusionMatrix(table(pred,test_set$Churn))
+conf_matrix
+```
+
+# Comparison with Stepwise regression model
+```{r}
+null_model<-glm(Churn~1,data=train_set,family = "binomial")
+full_model<-glm(Churn~.,data=train_set,family = "binomial")
+forward_model<-step(null_model,scope=list(lower=null_model,upper=full_model),direction="forward")
+
+step_prob<-predict(forward_model,test_set,type="response")
+
+ROC<-roc(test_set$Churn,step_prob)
+plot(ROC,col="red")
+auc(ROC)
+
+pred_Stepwise<-ifelse(step_prob>mean(step_prob),1,0)
+confusionMatrix(table(pred_Stepwise,test_set$Churn))
+```
+
+# Conclusion
+
+Predictors based on the business judgement: 
+
+Churn ~ Age + CitizenDesc + `Days Employed` + Department +  `Hispanic/Latino` + MaritalDesc + `Pay Rate` + `Performance Score` + RaceDesc + Sex
+
+Foward stepwise model:
+Churn ~ `Days Employed` + Department + Age + `Pay Rate`
+
+
+Stepwise method provides better model and less complicated model with higher AUC. Both give the same predictions on the cutoff of mean probablity. Overally speaking, forward stepwise model is the best model since it is simplier and has the accuracy with the full model.
